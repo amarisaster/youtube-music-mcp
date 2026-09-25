@@ -5,9 +5,15 @@ compatibility_date = "2025-01-01"
 [observability]
 enabled = true
 
-[[services]]
-binding = "GOOGLE_BROKER"
-service = "biometrics-cloud"
+# Create a private KV namespace, then uncomment and replace the id:
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "YOUR_KV_NAMESPACE_ID"
 
-# MCP_API_KEY, YOUTUBE_BROKER_KEY, YOUTUBE_DISCOVERY_KEY,
-# BIOMETRICS_AUTH_URL and DISCOVERY_URL are secrets.
+# Required secrets:
+# MCP_API_KEY, YOUTUBE_DISCOVERY_KEY, DISCOVERY_URL,
+# GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+#
+# Advanced deployments may replace direct Google OAuth with a private Worker
+# service binding named GOOGLE_BROKER plus YOUTUBE_BROKER_KEY and
+# BIOMETRICS_AUTH_URL. See SECURITY.md before exposing a broker.

@@ -1,4 +1,7 @@
 const YOUTUBE_API_URL = 'https://www.googleapis.com/youtube/v3'
+const GOOGLE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
+const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube.force-ssl'
 
 const TOOLS = [
   {
@@ -57,7 +60,7 @@ const TOOLS = [
   },
   {
     name: 'ytmusic_playlists',
-    description: "List Mai's YouTube and YouTube Music playlists.",
+    description: "List the connected user's YouTube and YouTube Music playlists.",
     inputSchema: {
       type: 'object',
       properties: { limit: { type: 'integer', minimum: 1, maximum: 50, default: 25 } },
@@ -172,13 +175,53 @@ function optionalVideoIds(value) {
 }
 
 async function broker(env, path, method = 'POST') {
-  const response = await env.GOOGLE_BROKER.fetch(`https://biometrics.internal${path}`, {
+  const response = await env.GOOGLE_BROKER.fetch(`https://google-broker.internal${path}`, {
     method,
     headers: { Authorization: `Bearer ${env.YOUTUBE_BROKER_KEY}` },
   })
   const value = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(value.error || `Google authorization broker returned ${response.status}`)
   return value
+}
+
+function brokerConfigured(env) {
+  return Boolean(env.GOOGLE_BROKER && env.YOUTUBE_BROKER_KEY && env.BIOMETRICS_AUTH_URL)
+}
+
+function directGoogleConfigured(env) {
+  return Boolean(env.KV && env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET)
+}
+
+async function storeGoogleTokens(env, tokens) {
+  if (tokens.access_token) await env.KV.put('youtube_access_token', tokens.access_token)
+  if (tokens.refresh_token) await env.KV.put('youtube_refresh_token', tokens.refresh_token)
+  if (tokens.expires_in) {
+    await env.KV.put('youtube_token_expires', String(Date.now() + Number(tokens.expires_in) * 1000))
+  }
+}
+
+async function directAccessToken(env) {
+  if (!directGoogleConfigured(env)) throw new Error('Direct Google OAuth is not configured')
+  const cached = await env.KV.get('youtube_access_token')
+  const expires = Number(await env.KV.get('youtube_token_expires') || 0)
+  if (cached && Date.now() < expires - 300_000) return cached
+
+  const refreshToken = await env.KV.get('youtube_refresh_token')
+  if (!refreshToken) throw new Error('YouTube Music is not connected. Open /auth once to grant access.')
+  const response = await fetch(GOOGLE_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  })
+  const tokens = await response.json().catch(() => ({}))
+  if (!response.ok || tokens.error) throw new Error(`Google token refresh failed: ${tokens.error || response.status}`)
+  await storeGoogleTokens(env, tokens)
+  return tokens.access_token
 }
 
 async function discovery(env, path, args) {
@@ -193,9 +236,12 @@ async function discovery(env, path, args) {
 }
 
 async function accessToken(env) {
-  const result = await broker(env, '/internal/youtube-token')
-  if (!result.access_token) throw new Error('YouTube Music is not connected. Open /auth once to grant access.')
-  return result.access_token
+  if (brokerConfigured(env)) {
+    const result = await broker(env, '/internal/youtube-token')
+    if (!result.access_token) throw new Error('YouTube Music is not connected. Open /auth once to grant access.')
+    return result.access_token
+  }
+  return directAccessToken(env)
 }
 
 async function youtubeApi(env, path, init = {}) {
@@ -368,27 +414,82 @@ export default {
 
     if (url.pathname === '/health') {
       let connected = false
-      try { connected = Boolean((await broker(env, '/internal/youtube-status', 'GET')).connected) } catch { /* reported below */ }
+      try {
+        connected = brokerConfigured(env)
+          ? Boolean((await broker(env, '/internal/youtube-status', 'GET')).connected)
+          : Boolean(directGoogleConfigured(env) && await env.KV.get('youtube_refresh_token'))
+      } catch { /* reported below */ }
+      const accountConfigured = brokerConfigured(env) || directGoogleConfigured(env)
       return json({
         status: connected ? 'authenticated' : 'not_authenticated',
-        configured: Boolean(env.GOOGLE_BROKER && env.YOUTUBE_BROKER_KEY && env.MCP_API_KEY && env.DISCOVERY_URL && env.YOUTUBE_DISCOVERY_KEY),
+        configured: Boolean(accountConfigured && env.MCP_API_KEY && env.DISCOVERY_URL && env.YOUTUBE_DISCOVERY_KEY),
         connected,
       })
     }
 
     if (url.pathname === '/auth') {
       if (!isAuthorized(request, url, env)) return json({ error: 'unauthorized' }, 401)
-      try {
-        const { ticket } = await broker(env, '/internal/youtube-auth-ticket')
-        return Response.redirect(`${env.BIOMETRICS_AUTH_URL.replace(/\/$/, '')}/auth?ticket=${encodeURIComponent(ticket)}`, 302)
-      } catch (error) {
-        return json({ error: error.message }, 503)
+      if (brokerConfigured(env)) {
+        try {
+          const { ticket } = await broker(env, '/internal/youtube-auth-ticket')
+          return Response.redirect(`${env.BIOMETRICS_AUTH_URL.replace(/\/$/, '')}/auth?ticket=${encodeURIComponent(ticket)}`, 302)
+        } catch (error) {
+          return json({ error: error.message }, 503)
+        }
       }
+      if (!directGoogleConfigured(env)) return json({ error: 'Google OAuth is not configured' }, 503)
+      const state = crypto.randomUUID()
+      await env.KV.put(`oauth_state:${state}`, '1', { expirationTtl: 600 })
+      const authUrl = new URL(GOOGLE_AUTH_URL)
+      authUrl.search = new URLSearchParams({
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: `${url.origin}/callback`,
+        response_type: 'code',
+        scope: YOUTUBE_SCOPE,
+        access_type: 'offline',
+        prompt: 'consent',
+        include_granted_scopes: 'true',
+        state,
+      })
+      return Response.redirect(authUrl.toString(), 302)
+    }
+
+    if (url.pathname === '/callback') {
+      if (!directGoogleConfigured(env)) return json({ error: 'direct Google OAuth is not configured' }, 404)
+      const state = url.searchParams.get('state') || ''
+      const stateKey = `oauth_state:${state}`
+      if (!state || !(await env.KV.get(stateKey))) return json({ error: 'invalid or expired OAuth state' }, 400)
+      await env.KV.delete(stateKey)
+      const code = url.searchParams.get('code')
+      if (!code) return json({ error: url.searchParams.get('error') || 'authorization code missing' }, 400)
+      const response = await fetch(GOOGLE_TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          code,
+          redirect_uri: `${url.origin}/callback`,
+          grant_type: 'authorization_code',
+        }),
+      })
+      const tokens = await response.json().catch(() => ({}))
+      if (!response.ok || tokens.error) {
+        return json({ error: tokens.error_description || tokens.error || 'token exchange failed' }, 400)
+      }
+      await storeGoogleTokens(env, tokens)
+      return new Response('YouTube Music connected. You can close this window.', {
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', ...CORS },
+      })
     }
 
     if (url.pathname === '/sse') {
       if (!isAuthorized(request, url, env)) return json({ error: 'unauthorized' }, 401)
-      return new Response(`event: endpoint\ndata: ${url.origin}/mcp\n\n`, {
+      // Headerless connector clients authenticate /sse with ?k= and cannot
+      // invent that credential again for the advertised POST endpoint.
+      const queryKey = url.searchParams.get('k') || ''
+      const endpoint = `${url.origin}/mcp${queryKey ? `?k=${encodeURIComponent(queryKey)}` : ''}`
+      return new Response(`event: endpoint\ndata: ${endpoint}\n\n`, {
         headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', ...CORS },
       })
     }
