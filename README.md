@@ -4,9 +4,16 @@ A self-hosted Model Context Protocol server for searching and organizing
 YouTube Music.
 
 It exposes 13 tools for Music-native discovery, lyrics, radio queues, charts,
-personal playlists, and ratings. It does **not** claim remote player controls:
-Google does not provide a supported API for YouTube Music's live player,
-devices, volume, queue, or now-playing state.
+personal playlists, and ratings.
+
+> [!IMPORTANT]
+> **This MCP cannot control live playback.** It cannot play, pause, skip to the
+> next or previous track, seek, change volume, select a playback device, or
+> read the live now-playing state. Neither the official YouTube Data API nor
+> `ytmusicapi` provides a remote-control API for the YouTube Music player, and
+> having YouTube Music Premium does not add one. Playback control would require
+> a separate browser extension or local player-control bridge connected to the
+> tab or application that is actually playing music.
 
 ## How it works
 
