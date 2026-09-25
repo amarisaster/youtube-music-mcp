@@ -1,0 +1,13 @@
+name = "youtube-music-cloud"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+[observability]
+enabled = true
+
+[[services]]
+binding = "GOOGLE_BROKER"
+service = "biometrics-cloud"
+
+# MCP_API_KEY, YOUTUBE_BROKER_KEY, YOUTUBE_DISCOVERY_KEY,
+# BIOMETRICS_AUTH_URL and DISCOVERY_URL are secrets.

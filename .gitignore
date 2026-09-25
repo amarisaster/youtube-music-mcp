@@ -1,0 +1,9 @@
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
+discovery/.venv/
+discovery/__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example

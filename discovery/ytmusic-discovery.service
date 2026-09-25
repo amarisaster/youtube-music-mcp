@@ -1,0 +1,22 @@
+[Unit]
+Description=YouTube Music discovery facade for Nexus Gateway
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mai
+Group=mai
+WorkingDirectory=/srv/wonderland/repos/youtube-music-mcp/discovery
+EnvironmentFile=/srv/wonderland/secrets/ytmusic-discovery.env
+ExecStart=/srv/wonderland/repos/youtube-music-mcp/discovery/.venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/wonderland/repos/youtube-music-mcp/discovery
+
+[Install]
+WantedBy=multi-user.target
